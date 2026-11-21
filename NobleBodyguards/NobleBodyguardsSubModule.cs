@@ -6,8 +6,16 @@ using TaleWorlds.MountAndBlade;
 
 namespace NobleBodyguards
 {
+    /// <summary>
+    /// Initializes the Noble Bodyguards campaign behavior and eligible mission behavior.
+    /// </summary>
     public class NobleBodyguardsSubModule : MBSubModuleBase
     {
+        /// <summary>
+        /// Adds bodyguard selection behavior when a campaign game starts.
+        /// </summary>
+        /// <param name="game">The game being started.</param>
+        /// <param name="gameStarterObject">The game starter used to register campaign behaviors.</param>
         protected override void OnGameStart(Game game, IGameStarter gameStarterObject)
         {
             base.OnGameStart(game, gameStarterObject);
@@ -23,16 +31,22 @@ namespace NobleBodyguards
             }
         }
 
+        /// <summary>
+        /// Adds bodyguard following to eligible town and village missions.
+        /// </summary>
+        /// <param name="mission">The mission being initialized.</param>
         public override void OnMissionBehaviorInitialize(Mission mission)
         {
             base.OnMissionBehaviorInitialize(mission);
 
             Settlement settlement = Settlement.CurrentSettlement;
             string sceneName = mission.SceneName ?? string.Empty;
+            // Arena and keep scenes are excluded from the settlement escort behavior.
             bool isExcludedScene =
                 sceneName.IndexOf("arena", StringComparison.OrdinalIgnoreCase) >= 0
                 || sceneName.IndexOf("keep", StringComparison.OrdinalIgnoreCase) >= 0;
 
+            // Attach escorts only to non-siege, non-stealth missions in towns or villages.
             if (!mission.IsSiegeBattle
                 && mission.Mode != MissionMode.Stealth
                 && !isExcludedScene
