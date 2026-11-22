@@ -75,13 +75,6 @@ namespace NobleBodyguards
             }
 
             SelectBodyguards(party);
-
-            // Keep the notification quiet when the party has no eligible infantry.
-            if (SelectedBodyguards.Count > 0)
-            {
-                InformationManager.DisplayMessage(new InformationMessage(
-                    $"{string.Join(" and ", SelectedBodyguards.Select(c => c.Name))} will escort you through {settlement.Name}."));
-            }
         }
     }
 }

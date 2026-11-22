@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.AgentOrigins;
 using TaleWorlds.CampaignSystem.Party;
+using TaleWorlds.Core;
 using TaleWorlds.Engine;
 using TaleWorlds.Library;
 using TaleWorlds.MountAndBlade;
@@ -84,6 +86,7 @@ namespace NobleBodyguards
                 if (agent != null)
                 {
                     _bodyguardAgents.Add(agent);
+                    Thread.Sleep(100); // Without this, colors dont get assigned properly to the second for some reason
                 }
 
                 index++;
@@ -108,6 +111,10 @@ namespace NobleBodyguards
             AgentBuildData buildData = new AgentBuildData(character)
                 .InitialPosition(spawnPosition)
                 .InitialDirection(player.Frame.rotation.f.AsVec2)
+                .Team(player.Team)
+                .Banner(PartyBase.MainParty.Banner)
+                .ClothingColor1(player.Team.Color)
+                .ClothingColor2(player.Team.Color2)
                 .TroopOrigin(new PartyAgentOrigin(PartyBase.MainParty, character))
                 .IsFemale(character.IsFemale)
                 .NoHorses(true);
@@ -132,8 +139,15 @@ namespace NobleBodyguards
                 player.Frame.rotation.f.y,
                 player.Frame.rotation.f.x);
 
-            // Set both the destination and facing to keep the guard aligned with the player.
-            bodyguard.SetScriptedPosition(ref worldPosition, false);
+            float offsetX = bodyguard.Position.x - targetPosition.x;
+            float offsetY = bodyguard.Position.y - targetPosition.y;
+
+            if (offsetX * offsetX + offsetY * offsetY > 2.25f)
+            {
+                bodyguard.SetScriptedPosition(ref worldPosition, false);
+                return;
+            }
+
             bodyguard.SetScriptedPositionAndDirection(ref worldPosition, direction, false);
         }
 
