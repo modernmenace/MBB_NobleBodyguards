@@ -86,7 +86,6 @@ namespace NobleBodyguards
                 if (agent != null)
                 {
                     _bodyguardAgents.Add(agent);
-                    Thread.Sleep(100); // Without this, colors dont get assigned properly to the second for some reason
                 }
 
                 index++;
