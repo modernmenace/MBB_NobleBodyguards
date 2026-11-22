@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Threading;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.AgentOrigins;
 using TaleWorlds.CampaignSystem.Party;
@@ -12,16 +11,19 @@ using TaleWorlds.MountAndBlade;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Spawns the selected bodyguards in a settlement mission and keeps them near the player.
+    /// Spawns selected party members in settlement missions, escorts the player, and engages nearby enemies.
     /// </summary>
     public class BodyguardFollowMissionBehavior : MissionBehavior
     {
         /// <summary>Distance behind the player at which bodyguards are positioned.</summary>
         private const float BehindDistance = 2f;
+
         /// <summary>Horizontal spacing used to position bodyguards on either side of the player.</summary>
         private const float SideDistance = 1f;
 
         private readonly List<Agent> _bodyguardAgents = new List<Agent>();
+        private readonly Dictionary<Agent, Agent.AIStateFlag> _savedAlarmFlags =
+            new Dictionary<Agent, Agent.AIStateFlag>();
 
         private bool _bodyguardsSpawnAttempted;
 
@@ -42,13 +44,14 @@ namespace NobleBodyguards
                 return;
             }
 
-            // Spawn once, then continually refresh each active agent's follow position.
+            // Spawn the selected guards once when the player is ready.
             if (!_bodyguardsSpawnAttempted)
             {
                 SpawnBodyguards();
                 _bodyguardsSpawnAttempted = true;
             }
 
+            // Prioritize combat; otherwise keep the guards in escort positions.
             for (int i = 0; i < _bodyguardAgents.Count; i++)
             {
                 Agent bodyguard = _bodyguardAgents[i];
@@ -57,6 +60,27 @@ namespace NobleBodyguards
                     continue;
                 }
 
+                Agent immediateEnemy = bodyguard.ImmediateEnemy;
+                bool hasActiveHostile =
+                    immediateEnemy != null
+                    && immediateEnemy.IsActive()
+                    && immediateEnemy.Team != null
+                    && bodyguard.Team != null
+                    && bodyguard.Team.IsEnemyOf(immediateEnemy.Team);
+
+                if (hasActiveHostile)
+                {
+                    SetCombatWatchState(bodyguard);
+
+                    if (bodyguard.GetTargetAgent() != immediateEnemy)
+                    {
+                        bodyguard.SetTargetAgent(immediateEnemy);
+                    }
+
+                    continue;
+                }
+
+                RestoreWatchState(bodyguard);
                 MoveAgentNearPlayer(bodyguard, player, i);
             }
         }
@@ -118,7 +142,16 @@ namespace NobleBodyguards
                 .IsFemale(character.IsFemale)
                 .NoHorses(true);
 
-            return Mission.Current.SpawnAgent(buildData);
+            Agent agent = Mission.Current.SpawnAgent(buildData);
+
+            if (agent != null)
+            {
+                agent.Controller = AgentControllerType.AI;
+                agent.IsPaused = false;
+                agent.SetAutomaticTargetSelection(true);
+            }
+
+            return agent;
         }
 
         /// <summary>Updates a bodyguard's scripted position and facing relative to the player.</summary>
@@ -161,6 +194,50 @@ namespace NobleBodyguards
             return player.Position
                 - player.Frame.rotation.f * BehindDistance
                 + player.Frame.rotation.s * sideOffset;
+        }
+
+        private void SetCombatWatchState(Agent bodyguard)
+        {
+            if (_savedAlarmFlags.ContainsKey(bodyguard))
+            {
+                return;
+            }
+
+            _savedAlarmFlags.Add(
+                bodyguard,
+                bodyguard.AIStateFlags & Agent.AIStateFlag.AlarmStateMask);
+
+            bodyguard.AIStateFlags |= Agent.AIStateFlag.Alarmed;
+            bodyguard.SetWatchState(Agent.WatchState.Alarmed);
+        }
+
+        private void RestoreWatchState(Agent bodyguard)
+        {
+            if (!_savedAlarmFlags.TryGetValue(bodyguard, out Agent.AIStateFlag savedAlarmFlags))
+            {
+                return;
+            }
+
+            Agent.WatchState previousWatchState = Agent.WatchState.Patrolling;
+            Agent.AIStateFlag previousAlarmState =
+                savedAlarmFlags & Agent.AIStateFlag.AlarmStateMask;
+
+            if (previousAlarmState == Agent.AIStateFlag.Alarmed)
+            {
+                previousWatchState = Agent.WatchState.Alarmed;
+            }
+            else if (previousAlarmState == Agent.AIStateFlag.Cautious)
+            {
+                previousWatchState = Agent.WatchState.Cautious;
+            }
+
+            bodyguard.SetTargetAgent(null);
+            bodyguard.SetWatchState(previousWatchState);
+            bodyguard.AIStateFlags =
+                (bodyguard.AIStateFlags & ~Agent.AIStateFlag.AlarmStateMask)
+                | previousAlarmState;
+
+            _savedAlarmFlags.Remove(bodyguard);
         }
     }
 }

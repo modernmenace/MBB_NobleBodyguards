@@ -5,11 +5,12 @@
   <SingleplayerModule value="true"/>
   <MultiplayerModule value="false"/>
   <DependedModules>
+    <DependedModule Id="Bannerlord.MBOptionScreen" DependentVersion="v5.0.0"/>
     <DependedModule Id="Native"/>
     <DependedModule Id="SandBoxCore"/>
     <DependedModule Id="Sandbox"/>
     <DependedModule Id="CustomBattle"/>
-    <DependedModule Id="StoryMode" />
+    <DependedModule Id="StoryMode"/>
   </DependedModules>
   <SubModules>
     <SubModule>

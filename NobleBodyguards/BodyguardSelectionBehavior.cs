@@ -10,7 +10,7 @@ using TaleWorlds.Library;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Selects eligible party members to escort the player in settlement missions.
+    /// Selects healthy, non-hero infantry from the main party for settlement escort missions.
     /// </summary>
     public class BodyguardSelectionBehavior : CampaignBehaviorBase
     {

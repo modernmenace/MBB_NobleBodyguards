@@ -7,12 +7,12 @@ using TaleWorlds.MountAndBlade;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Initializes the Noble Bodyguards campaign behavior and eligible mission behavior.
+    /// Registers campaign selection and adds bodyguard behavior to eligible settlement missions.
     /// </summary>
     public class NobleBodyguardsSubModule : MBSubModuleBase
     {
         /// <summary>
-        /// Adds bodyguard selection behavior when a campaign game starts.
+        /// Adds the campaign selection behavior when a campaign starts.
         /// </summary>
         /// <param name="game">The game being started.</param>
         /// <param name="gameStarterObject">The game starter used to register campaign behaviors.</param>
@@ -32,12 +32,18 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Adds bodyguard following to eligible town and village missions.
+        /// Adds bodyguard escort behavior to eligible town and village missions when enabled in MCM.
         /// </summary>
         /// <param name="mission">The mission being initialized.</param>
         public override void OnMissionBehaviorInitialize(Mission mission)
         {
             base.OnMissionBehaviorInitialize(mission);
+
+            if (!NobleBodyguardsSettings.Instance.Enabled)
+            {
+                // disabled via MCM
+                return;
+            }
 
             Settlement settlement = Settlement.CurrentSettlement;
             string sceneName = mission.SceneName ?? string.Empty;
