@@ -39,28 +39,26 @@ namespace NobleBodyguards
         {
             base.OnMissionBehaviorInitialize(mission);
 
-            if (!NobleBodyguardsSettings.Instance.Enabled)
+            if (!NobleBodyguardsSettings.Instance.Enabled || Campaign.Current == null)
             {
-                // disabled via MCM
                 return;
             }
 
             Settlement settlement = Settlement.CurrentSettlement;
             string sceneName = mission.SceneName ?? string.Empty;
-            // Arena and keep scenes are excluded from the settlement escort behavior.
+
             bool isExcludedScene =
                 sceneName.IndexOf("arena", StringComparison.OrdinalIgnoreCase) >= 0
                 || sceneName.IndexOf("keep", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            // Attach escorts only to non-siege, non-stealth missions in towns or villages.
             if (!mission.IsSiegeBattle
                 && mission.Mode != MissionMode.Stealth
                 && !isExcludedScene
                 && settlement != null
                 && (settlement.IsTown || settlement.IsVillage))
-                        {
-                            mission.AddMissionBehavior(new BodyguardFollowMissionBehavior());
-                        }
+            {
+                mission.AddMissionBehavior(new BodyguardFollowMissionBehavior());
+            }
         }
     }
 }
