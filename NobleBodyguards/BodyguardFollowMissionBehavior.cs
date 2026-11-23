@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.AgentOrigins;
 using TaleWorlds.CampaignSystem.Party;
+using TaleWorlds.CampaignSystem.Settlements;
 using TaleWorlds.Core;
 using TaleWorlds.Engine;
 using TaleWorlds.Library;
@@ -26,6 +27,7 @@ namespace NobleBodyguards
             new Dictionary<Agent, Agent.AIStateFlag>();
 
         private bool _bodyguardsSpawnAttempted;
+        private bool _mountedEscort;
 
         /// <summary>Gets the mission behavior category for this behavior.</summary>
         public override MissionBehaviorType BehaviorType => MissionBehaviorType.Other;
@@ -47,6 +49,8 @@ namespace NobleBodyguards
             // Spawn the selected guards once when the player is ready.
             if (!_bodyguardsSpawnAttempted)
             {
+                _mountedEscort = IsMountedVillageEscort(player);
+                BodyguardSelectionBehavior.SelectBodyguards(MobileParty.MainParty, _mountedEscort);
                 SpawnBodyguards();
                 _bodyguardsSpawnAttempted = true;
             }
@@ -86,16 +90,15 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Refreshes the bodyguard selection from the main party after the mission starts.
+        /// Determines whether escorts should be mounted: the player must be riding in a village.
         /// </summary>
-        public override void AfterStart()
+        /// <param name="player">The player agent.</param>
+        /// <returns><see langword="true"/> if the player is mounted in a village; otherwise <see langword="false"/>.</returns>
+        private static bool IsMountedVillageEscort(Agent player)
         {
-            base.AfterStart();
-
-            if (MobileParty.MainParty != null)
-            {
-                BodyguardSelectionBehavior.SelectBodyguards(MobileParty.MainParty);
-            }
+            return player.MountAgent != null
+                && Settlement.CurrentSettlement != null
+                && Settlement.CurrentSettlement.IsVillage;
         }
 
         /// <summary>Attempts to spawn each selected bodyguard near the player.</summary>
@@ -130,7 +133,7 @@ namespace NobleBodyguards
 
             Vec3 spawnPosition = GetFollowPosition(player, index);
 
-            // Use the troop's campaign origin while spawning it without a mount.
+            // Use the troop's campaign origin; mounted escorts use their equipped horse.
             AgentBuildData buildData = new AgentBuildData(character)
                 .InitialPosition(spawnPosition)
                 .InitialDirection(player.Frame.rotation.f.AsVec2)
@@ -140,7 +143,7 @@ namespace NobleBodyguards
                 .ClothingColor2(player.Team.Color2)
                 .TroopOrigin(new PartyAgentOrigin(PartyBase.MainParty, character))
                 .IsFemale(character.IsFemale)
-                .NoHorses(true);
+                .NoHorses(!_mountedEscort);
 
             Agent agent = Mission.Current.SpawnAgent(buildData);
 

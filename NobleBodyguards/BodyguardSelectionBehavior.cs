@@ -10,7 +10,7 @@ using TaleWorlds.Library;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Selects healthy, non-hero infantry from the main party for settlement escort missions.
+    /// Selects healthy, non-hero troops from the main party for settlement escort missions.
     /// </summary>
     public class BodyguardSelectionBehavior : CampaignBehaviorBase
     {
@@ -36,21 +36,46 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Selects up to two healthy, non-hero infantry members from the specified party.
+        /// Selects up to two healthy, non-hero members from the specified party.
         /// </summary>
         /// <param name="party">The party whose roster is used for selection. If <see langword="null"/>, the current selection is unchanged.</param>
-        public static void SelectBodyguards(MobileParty party)
+        /// <param name="preferCavalry">If <see langword="true"/>, selects mounted troops first, falling back to infantry when none are available.</param>
+        public static void SelectBodyguards(MobileParty party, bool preferCavalry = false)
         {
             if (party == null)
             {
                 return;
             }
 
-            // Expand healthy, non-hero infantry stacks into individual candidates, then rank them.
-            SelectedBodyguards = party.MemberRoster.GetTroopRoster()
-                .Where(element => !element.Character.IsHero
-                                   && element.Character.IsInfantry
-                                   && element.Number > element.WoundedNumber)
+            List<TroopRosterElement> troops = party.MemberRoster.GetTroopRoster()
+                .Where(element => !element.Character.IsHero)
+                .ToList();
+
+            if (preferCavalry)
+            {
+                List<CharacterObject> cavalry = RankHealthyTroops(
+                    troops.Where(element => element.Character.IsMounted));
+
+                if (cavalry.Count > 0)
+                {
+                    SelectedBodyguards = cavalry;
+                    return;
+                }
+            }
+
+            SelectedBodyguards = RankHealthyTroops(
+                troops.Where(element => element.Character.IsInfantry));
+        }
+
+        /// <summary>
+        /// Expands healthy troop stacks into individual candidates, ranks them, and returns the top two.
+        /// </summary>
+        /// <param name="troops">The roster elements to consider.</param>
+        /// <returns>Up to two ranked troops.</returns>
+        private static List<CharacterObject> RankHealthyTroops(IEnumerable<TroopRosterElement> troops)
+        {
+            return troops
+                .Where(element => element.Number > element.WoundedNumber)
                 .SelectMany(element => Enumerable.Repeat(
                     element.Character,
                     element.Number - element.WoundedNumber))
