@@ -157,7 +157,7 @@ namespace NobleBodyguards
             return agent;
         }
 
-        /// <summary>Updates a bodyguard's scripted position and facing relative to the player.</summary>
+        /// <summary>Walks a bodyguard to its slot, then matches the player's facing once it arrives.</summary>
         /// <param name="bodyguard">The agent to move.</param>
         /// <param name="player">The player agent used as the follow reference.</param>
         /// <param name="index">The body's position index in the formation.</param>
@@ -170,18 +170,20 @@ namespace NobleBodyguards
                 targetPosition,
                 true);
 
-            float direction = (float)System.Math.Atan2(
-                player.Frame.rotation.f.y,
-                player.Frame.rotation.f.x);
-
             float offsetX = bodyguard.Position.x - targetPosition.x;
             float offsetY = bodyguard.Position.y - targetPosition.y;
 
-            if (offsetX * offsetX + offsetY * offsetY > 2.25f)
+            // While walking, let the guard face its path instead of snapping sideways.
+            if (offsetX * offsetX + offsetY * offsetY > 0.25f)
             {
                 bodyguard.SetScriptedPosition(ref worldPosition, false);
                 return;
             }
+
+            // Once in position, hold the player's heading so the guard stands behind them.
+            float direction = (float)System.Math.Atan2(
+                -player.Frame.rotation.f.x,
+                player.Frame.rotation.f.y);
 
             bodyguard.SetScriptedPositionAndDirection(ref worldPosition, direction, false);
         }
