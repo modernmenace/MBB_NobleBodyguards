@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.AgentOrigins;
 using TaleWorlds.CampaignSystem.Party;
@@ -12,22 +13,36 @@ using TaleWorlds.MountAndBlade;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Spawns selected party members in settlement missions, escorts the player, and engages nearby enemies.
+    /// Spawns escorts for the player, companions, and lords in settlement missions, and engages nearby enemies.
     /// </summary>
     public class BodyguardFollowMissionBehavior : MissionBehavior
     {
-        /// <summary>Distance behind the player at which bodyguards are positioned.</summary>
+        /// <summary>Distance behind the leader at which escorts are positioned.</summary>
         private const float BehindDistance = 2f;
 
-        /// <summary>Horizontal spacing used to position bodyguards on either side of the player.</summary>
+        /// <summary>Horizontal spacing used to position escorts on either side of the leader.</summary>
         private const float SideDistance = 1f;
 
-        private readonly List<Agent> _bodyguardAgents = new List<Agent>();
+        /// <summary>Seconds between scans for new or departed leaders.</summary>
+        private const float LeaderScanInterval = 1f;
+
+        private readonly List<EscortGroup> _groups = new List<EscortGroup>();
         private readonly Dictionary<Agent, Agent.AIStateFlag> _savedAlarmFlags =
             new Dictionary<Agent, Agent.AIStateFlag>();
+        private readonly Dictionary<MobileParty, Dictionary<CharacterObject, int>> _takenUnits =
+            new Dictionary<MobileParty, Dictionary<CharacterObject, int>>();
 
-        private bool _bodyguardsSpawnAttempted;
-        private bool _mountedEscort;
+        private bool _playerGroupSpawned;
+        private float _leaderScanTimer;
+
+        /// <summary>A leader and the escorts assigned to them.</summary>
+        private sealed class EscortGroup
+        {
+            public Agent Leader;
+            public PartyBase Party;
+            public bool Mounted;
+            public readonly List<Agent> Escorts = new List<Agent>();
+        }
 
         /// <summary>Snapshot of an escort's state, used to rebuild it after a mount change.</summary>
         private struct EscortSnapshot
@@ -42,8 +57,8 @@ namespace NobleBodyguards
         public override MissionBehaviorType BehaviorType => MissionBehaviorType.Other;
 
         /// <summary>
-        /// Spawns the selected bodyguards once the player is active, respawns them when the player
-        /// mounts or dismounts, and updates their follow positions.
+        /// Spawns the player's escorts once, adds escorts for eligible companions and lords,
+        /// respawns escorts when their leader changes mount state, and updates their positions.
         /// </summary>
         /// <param name="dt">Elapsed time since the previous mission tick.</param>
         public override void OnMissionTick(float dt)
@@ -56,109 +71,238 @@ namespace NobleBodyguards
                 return;
             }
 
-            // Spawn the selected guards once when the player is ready.
-            if (!_bodyguardsSpawnAttempted)
+            // Spawn the player's selected guards once when the player is ready.
+            if (!_playerGroupSpawned)
             {
-                _mountedEscort = IsMountedVillageEscort(player);
-                BodyguardSelectionBehavior.SelectBodyguards(MobileParty.MainParty, _mountedEscort);
-                SpawnBodyguards();
-                _bodyguardsSpawnAttempted = true;
+                _playerGroupSpawned = true;
+                bool playerMounted = IsMountedVillageEscort(player);
+                BodyguardSelectionBehavior.SelectBodyguards(MobileParty.MainParty, playerMounted);
+                SpawnGroup(player, PartyBase.MainParty, playerMounted, BodyguardSelectionBehavior.SelectedBodyguards);
             }
-            else
+
+            _leaderScanTimer -= dt;
+            if (_leaderScanTimer <= 0f)
             {
-                // Swap escorts to match the player's current mount state.
-                bool mountedEscortWanted = IsMountedVillageEscort(player);
-                if (mountedEscortWanted != _mountedEscort)
+                _leaderScanTimer = LeaderScanInterval;
+                RemoveInactiveGroups();
+
+                // Companion and lord escorts are skipped when the player-only option is on.
+                bool playerOnly = NobleBodyguardsSettings.Instance?.PlayerOnly ?? false;
+                if (!playerOnly)
                 {
-                    RespawnEscorts(mountedEscortWanted);
+                    AddNewLeaders(player);
                 }
             }
 
-            // Prioritize combat; otherwise keep the guards in escort positions.
-            for (int i = 0; i < _bodyguardAgents.Count; i++)
+            foreach (EscortGroup group in _groups)
             {
-                Agent bodyguard = _bodyguardAgents[i];
-                if (bodyguard == null || !bodyguard.IsActive())
+                if (group.Leader == null || !group.Leader.IsActive())
                 {
                     continue;
                 }
 
-                Agent immediateEnemy = bodyguard.ImmediateEnemy;
-                bool hasActiveHostile =
-                    immediateEnemy != null
-                    && immediateEnemy.IsActive()
-                    && immediateEnemy.Team != null
-                    && bodyguard.Team != null
-                    && bodyguard.Team.IsEnemyOf(immediateEnemy.Team);
-
-                if (hasActiveHostile)
+                // Swap each group's escorts to match its leader's current mount state.
+                bool mountedWanted = IsMountedVillageEscort(group.Leader);
+                if (mountedWanted != group.Mounted)
                 {
-                    SetCombatWatchState(bodyguard);
-
-                    if (bodyguard.GetTargetAgent() != immediateEnemy)
-                    {
-                        bodyguard.SetTargetAgent(immediateEnemy);
-                    }
-
-                    continue;
+                    RespawnEscorts(group, mountedWanted);
                 }
 
-                RestoreWatchState(bodyguard);
-                MoveAgentNearPlayer(bodyguard, player, i);
+                UpdateEscorts(group);
             }
         }
 
         /// <summary>
-        /// Determines whether escorts should be mounted: the player must be riding in a village.
+        /// Determines whether escorts should be mounted: the leader must be riding in a village.
         /// </summary>
-        /// <param name="player">The player agent.</param>
-        /// <returns><see langword="true"/> if the player is mounted in a village; otherwise <see langword="false"/>.</returns>
-        private static bool IsMountedVillageEscort(Agent player)
+        /// <param name="leader">The leader agent.</param>
+        /// <returns><see langword="true"/> if the leader is mounted in a village; otherwise <see langword="false"/>.</returns>
+        private static bool IsMountedVillageEscort(Agent leader)
         {
-            return player.MountAgent != null
+            return leader.MountAgent != null
                 && Settlement.CurrentSettlement != null
                 && Settlement.CurrentSettlement.IsVillage;
         }
 
-        /// <summary>Attempts to spawn each selected bodyguard near the player.</summary>
-        private void SpawnBodyguards()
+        /// <summary>
+        /// Gets the party a mission agent belongs to, if it has one.
+        /// </summary>
+        /// <param name="agent">The agent to inspect.</param>
+        /// <returns>The agent's party, or <see langword="null"/> if it has none.</returns>
+        private static PartyBase GetLeaderParty(Agent agent)
         {
-            Agent player = Agent.Main;
-            if (player == null)
+            return (agent.Origin as PartyAgentOrigin)?.Party;
+        }
+
+        /// <summary>
+        /// Determines whether an agent should receive escorts: player companions who are not in the player's party,
+        /// or lords whose party is part of an army. Notables and the player are excluded.
+        /// </summary>
+        /// <param name="agent">The agent to test.</param>
+        /// <returns><see langword="true"/> if the agent is an eligible leader; otherwise <see langword="false"/>.</returns>
+        private static bool IsEligibleLeader(Agent agent)
+        {
+            Hero hero = (agent.Character as CharacterObject)?.HeroObject;
+            PartyBase party = GetLeaderParty(agent);
+
+            if (hero == null || hero == Hero.MainHero || party == null || party.MobileParty == null)
+            {
+                return false;
+            }
+
+            if (hero.IsPlayerCompanion)
+            {
+                // Companions in the player's party already follow the player, so they are not escorted.
+                return party.MobileParty != MobileParty.MainParty;
+            }
+
+            return party.MobileParty.Army != null;
+        }
+
+        /// <summary>
+        /// Gets the set of troops already assigned from a party, creating it if needed.
+        /// </summary>
+        /// <param name="party">The party whose assignments are requested.</param>
+        /// <returns>The assigned counts, keyed by character.</returns>
+        private Dictionary<CharacterObject, int> GetTakenUnits(PartyBase party)
+        {
+            MobileParty mobileParty = party.MobileParty;
+
+            if (!_takenUnits.TryGetValue(mobileParty, out Dictionary<CharacterObject, int> taken))
+            {
+                taken = new Dictionary<CharacterObject, int>();
+                _takenUnits.Add(mobileParty, taken);
+            }
+
+            return taken;
+        }
+
+        /// <summary>
+        /// Scans the mission for eligible leaders that do not yet have an escort group and spawns one for each.
+        /// </summary>
+        /// <param name="player">The player agent, which is never treated as a leader here.</param>
+        private void AddNewLeaders(Agent player)
+        {
+            if (Mission.Current == null)
             {
                 return;
             }
 
-            int index = 0;
-
-            // Preserve selection order so each guard keeps a consistent side of the player.
-            foreach (CharacterObject character in BodyguardSelectionBehavior.SelectedBodyguards)
+            // Collect candidates first so spawning does not change the collection being read.
+            List<Agent> candidates = new List<Agent>();
+            foreach (Agent agent in Mission.Current.Agents)
             {
-                Vec3 spawnPosition = GetFollowPosition(player, index);
-                Vec2 spawnDirection = player.Frame.rotation.f.AsVec2;
-
-                Agent agent = SpawnAgent(character, spawnPosition, spawnDirection);
-                if (agent != null)
+                if (agent != player
+                    && agent.IsActive()
+                    && IsEligibleLeader(agent)
+                    && !_groups.Exists(group => group.Leader == agent))
                 {
-                    _bodyguardAgents.Add(agent);
+                    candidates.Add(agent);
                 }
+            }
 
-                index++;
+            foreach (Agent leader in candidates)
+            {
+                PartyBase party = GetLeaderParty(leader);
+                bool mounted = IsMountedVillageEscort(leader);
+                List<CharacterObject> picks = BodyguardSelectionBehavior.ChooseEscorts(
+                    party.MobileParty,
+                    mounted,
+                    GetTakenUnits(party));
+
+                if (picks.Count > 0)
+                {
+                    SpawnGroup(leader, party, mounted, picks);
+                }
             }
         }
 
         /// <summary>
-        /// Replaces every escort with a new agent in the matching mount state. Each replacement keeps
+        /// Removes groups whose leader is no longer active and fades out their escorts.
+        /// </summary>
+        private void RemoveInactiveGroups()
+        {
+            for (int i = _groups.Count - 1; i >= 0; i--)
+            {
+                EscortGroup group = _groups[i];
+                if (group.Leader != null && group.Leader.IsActive())
+                {
+                    continue;
+                }
+
+                foreach (Agent escort in group.Escorts)
+                {
+                    if (escort == null)
+                    {
+                        continue;
+                    }
+
+                    _savedAlarmFlags.Remove(escort);
+                    if (escort.IsActive())
+                    {
+                        escort.FadeOut(false, true);
+                    }
+                }
+
+                _groups.RemoveAt(i);
+            }
+        }
+
+        /// <summary>
+        /// Spawns escorts for a leader and registers the group when at least one escort spawns.
+        /// </summary>
+        /// <param name="leader">The agent the escorts follow.</param>
+        /// <param name="party">The party the escorts are drawn from.</param>
+        /// <param name="mounted">Whether the escorts should be mounted.</param>
+        /// <param name="picks">The troops to spawn, in side order.</param>
+        private void SpawnGroup(Agent leader, PartyBase party, bool mounted, List<CharacterObject> picks)
+        {
+            EscortGroup group = new EscortGroup
+            {
+                Leader = leader,
+                Party = party,
+                Mounted = mounted
+            };
+
+            Dictionary<CharacterObject, int> taken = GetTakenUnits(party);
+
+            for (int index = 0; index < picks.Count; index++)
+            {
+                CharacterObject character = picks[index];
+                Vec3 spawnPosition = GetFollowPosition(leader, index, mounted);
+                Vec2 spawnDirection = leader.Frame.rotation.f.AsVec2;
+
+                Agent agent = SpawnAgent(group, character, spawnPosition, spawnDirection);
+                if (agent == null)
+                {
+                    continue;
+                }
+
+                group.Escorts.Add(agent);
+
+                taken.TryGetValue(character, out int takenCount);
+                taken[character] = takenCount + 1;
+            }
+
+            if (group.Escorts.Count > 0)
+            {
+                _groups.Add(group);
+            }
+        }
+
+        /// <summary>
+        /// Replaces every escort in a group with a new agent in the matching mount state. Each replacement keeps
         /// the old escort's position, facing, watch state, and combat state.
         /// </summary>
+        /// <param name="group">The group to respawn.</param>
         /// <param name="mounted">Whether the replacement escorts should be mounted.</param>
-        private void RespawnEscorts(bool mounted)
+        private void RespawnEscorts(EscortGroup group, bool mounted)
         {
-            _mountedEscort = mounted;
+            group.Mounted = mounted;
 
-            for (int i = 0; i < _bodyguardAgents.Count; i++)
+            for (int i = 0; i < group.Escorts.Count; i++)
             {
-                Agent oldAgent = _bodyguardAgents[i];
+                Agent oldAgent = group.Escorts[i];
                 if (oldAgent == null || !oldAgent.IsActive())
                 {
                     continue;
@@ -170,7 +314,7 @@ namespace NobleBodyguards
                     continue;
                 }
 
-                Agent newAgent = SpawnAgent(snapshot.Character, snapshot.Position, snapshot.Direction);
+                Agent newAgent = SpawnAgent(group, snapshot.Character, snapshot.Position, snapshot.Direction);
                 if (newAgent == null)
                 {
                     continue;
@@ -193,7 +337,7 @@ namespace NobleBodyguards
                 }
 
                 oldAgent.FadeOut(false, true);
-                _bodyguardAgents[i] = newAgent;
+                group.Escorts[i] = newAgent;
             }
         }
 
@@ -212,31 +356,32 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Creates a mission agent at the given position and facing, matching the current mount state.
+        /// Creates a mission agent for a group at the given position and facing, matching the group's mount state.
         /// </summary>
+        /// <param name="group">The group the agent belongs to.</param>
         /// <param name="character">The character to spawn.</param>
         /// <param name="position">The world-space spawn position.</param>
         /// <param name="direction">The horizontal facing direction.</param>
-        /// <returns>The spawned agent, or <see langword="null"/> if there is no player agent or the spawn failed.</returns>
-        private Agent SpawnAgent(CharacterObject character, Vec3 position, Vec2 direction)
+        /// <returns>The spawned agent, or <see langword="null"/> if the leader or the spawn is unavailable.</returns>
+        private Agent SpawnAgent(EscortGroup group, CharacterObject character, Vec3 position, Vec2 direction)
         {
-            Agent player = Agent.Main;
-            if (player == null)
+            Agent leader = group.Leader;
+            if (leader == null || leader.Team == null)
             {
                 return null;
             }
 
-            // Use the troop's campaign origin; mounted escorts use their equipped horse.
+            // Use the leader's party origin; mounted escorts use their equipped horse.
             AgentBuildData buildData = new AgentBuildData(character)
                 .InitialPosition(position)
                 .InitialDirection(direction)
-                .Team(player.Team)
-                .Banner(PartyBase.MainParty.Banner)
-                .ClothingColor1(player.Team.Color)
-                .ClothingColor2(player.Team.Color2)
-                .TroopOrigin(new PartyAgentOrigin(PartyBase.MainParty, character))
+                .Team(leader.Team)
+                .Banner(group.Party.Banner)
+                .ClothingColor1(leader.Team.Color)
+                .ClothingColor2(leader.Team.Color2)
+                .TroopOrigin(new PartyAgentOrigin(group.Party, character))
                 .IsFemale(character.IsFemale)
-                .NoHorses(!_mountedEscort);
+                .NoHorses(!group.Mounted);
 
             Agent agent = Mission.Current.SpawnAgent(buildData);
 
@@ -250,75 +395,116 @@ namespace NobleBodyguards
             return agent;
         }
 
-        /// <summary>Walks a bodyguard to its slot, then matches the player's facing once it arrives.</summary>
-        /// <param name="bodyguard">The agent to move.</param>
-        /// <param name="player">The player agent used as the follow reference.</param>
-        /// <param name="index">The body's position index in the formation.</param>
-        private void MoveAgentNearPlayer(Agent bodyguard, Agent player, int index)
+        /// <summary>Updates every escort in a group: fights nearby enemies, otherwise holds its slot.</summary>
+        /// <param name="group">The group to update.</param>
+        private void UpdateEscorts(EscortGroup group)
         {
-            Vec3 targetPosition = GetFollowPosition(player, index);
+            Agent leader = group.Leader;
+
+            for (int i = 0; i < group.Escorts.Count; i++)
+            {
+                Agent escort = group.Escorts[i];
+                if (escort == null || !escort.IsActive())
+                {
+                    continue;
+                }
+
+                Agent immediateEnemy = escort.ImmediateEnemy;
+                bool hasActiveHostile =
+                    immediateEnemy != null
+                    && immediateEnemy.IsActive()
+                    && immediateEnemy.Team != null
+                    && escort.Team != null
+                    && escort.Team.IsEnemyOf(immediateEnemy.Team);
+
+                if (hasActiveHostile)
+                {
+                    SetCombatWatchState(escort);
+
+                    if (escort.GetTargetAgent() != immediateEnemy)
+                    {
+                        escort.SetTargetAgent(immediateEnemy);
+                    }
+
+                    continue;
+                }
+
+                RestoreWatchState(escort);
+                MoveAgentNearLeader(escort, leader, i, group.Mounted);
+            }
+        }
+
+        /// <summary>Walks an escort to its slot, then matches the leader's facing once it arrives.</summary>
+        /// <param name="escort">The agent to move.</param>
+        /// <param name="leader">The leader agent used as the follow reference.</param>
+        /// <param name="index">The escort's position index in the group.</param>
+        /// <param name="mounted">Whether the group is mounted, which changes the spacing.</param>
+        private void MoveAgentNearLeader(Agent escort, Agent leader, int index, bool mounted)
+        {
+            Vec3 targetPosition = GetFollowPosition(leader, index, mounted);
             WorldPosition worldPosition = new WorldPosition(
                 Mission.Current.Scene,
                 UIntPtr.Zero,
                 targetPosition,
                 true);
 
-            float offsetX = bodyguard.Position.x - targetPosition.x;
-            float offsetY = bodyguard.Position.y - targetPosition.y;
+            float offsetX = escort.Position.x - targetPosition.x;
+            float offsetY = escort.Position.y - targetPosition.y;
 
-            // While walking, let the guard face its path instead of snapping sideways.
+            // While walking, let the escort face its path instead of snapping sideways.
             if (offsetX * offsetX + offsetY * offsetY > 0.25f)
             {
-                bodyguard.SetScriptedPosition(ref worldPosition, false);
+                escort.SetScriptedPosition(ref worldPosition, false);
                 return;
             }
 
-            // Once in position, hold the player's heading so the guard stands behind them.
-            float direction = (float)System.Math.Atan2(
-                -player.Frame.rotation.f.x,
-                player.Frame.rotation.f.y);
+            // Once in position, hold the leader's heading so the escort stands behind them.
+            float direction = (float)Math.Atan2(
+                -leader.Frame.rotation.f.x,
+                leader.Frame.rotation.f.y);
 
-            bodyguard.SetScriptedPositionAndDirection(ref worldPosition, direction, false);
+            escort.SetScriptedPositionAndDirection(ref worldPosition, direction, false);
         }
 
-        /// <summary>Calculates a position behind and to one side of the player.</summary>
-        /// <param name="player">The player agent used as the position reference.</param>
-        /// <param name="index">The body's position index, which determines its side.</param>
-        /// <returns>The world-space position where the bodyguard should stand.</returns>
-        private Vec3 GetFollowPosition(Agent player, int index)
+        /// <summary>Calculates a position behind and to one side of a leader.</summary>
+        /// <param name="leader">The leader agent used as the position reference.</param>
+        /// <param name="index">The escort's position index, which determines its side.</param>
+        /// <param name="mounted">Whether the group is mounted, which changes the spacing.</param>
+        /// <returns>The world-space position where the escort should stand.</returns>
+        private static Vec3 GetFollowPosition(Agent leader, int index, bool mounted)
         {
             float sideOffset = index == 0 ? -SideDistance : SideDistance;
 
             // Mounted escorts sit farther back to leave room for their horses.
-            float behindDistance = _mountedEscort ? (BehindDistance + 1.0f) : BehindDistance;
+            float behindDistance = mounted ? (BehindDistance + 1.0f) : BehindDistance;
 
-            return player.Position
-                - player.Frame.rotation.f * behindDistance
-                + player.Frame.rotation.s * sideOffset;
+            return leader.Position
+                - leader.Frame.rotation.f * behindDistance
+                + leader.Frame.rotation.s * sideOffset;
         }
 
-        /// <summary>Saves the bodyguard's alarm state and switches it to alarmed during combat.</summary>
-        /// <param name="bodyguard">The bodyguard entering combat.</param>
-        private void SetCombatWatchState(Agent bodyguard)
+        /// <summary>Saves the escort's alarm state and switches it to alarmed during combat.</summary>
+        /// <param name="escort">The escort entering combat.</param>
+        private void SetCombatWatchState(Agent escort)
         {
-            if (_savedAlarmFlags.ContainsKey(bodyguard))
+            if (_savedAlarmFlags.ContainsKey(escort))
             {
                 return;
             }
 
             _savedAlarmFlags.Add(
-                bodyguard,
-                bodyguard.AIStateFlags & Agent.AIStateFlag.AlarmStateMask);
+                escort,
+                escort.AIStateFlags & Agent.AIStateFlag.AlarmStateMask);
 
-            bodyguard.AIStateFlags |= Agent.AIStateFlag.Alarmed;
-            bodyguard.SetWatchState(Agent.WatchState.Alarmed);
+            escort.AIStateFlags |= Agent.AIStateFlag.Alarmed;
+            escort.SetWatchState(Agent.WatchState.Alarmed);
         }
 
-        /// <summary>Restores the bodyguard's saved alarm state after combat ends.</summary>
-        /// <param name="bodyguard">The bodyguard leaving combat.</param>
-        private void RestoreWatchState(Agent bodyguard)
+        /// <summary>Restores the escort's saved alarm state after combat ends.</summary>
+        /// <param name="escort">The escort leaving combat.</param>
+        private void RestoreWatchState(Agent escort)
         {
-            if (!_savedAlarmFlags.TryGetValue(bodyguard, out Agent.AIStateFlag savedAlarmFlags))
+            if (!_savedAlarmFlags.TryGetValue(escort, out Agent.AIStateFlag savedAlarmFlags))
             {
                 return;
             }
@@ -336,13 +522,13 @@ namespace NobleBodyguards
                 previousWatchState = Agent.WatchState.Cautious;
             }
 
-            bodyguard.SetTargetAgent(null);
-            bodyguard.SetWatchState(previousWatchState);
-            bodyguard.AIStateFlags =
-                (bodyguard.AIStateFlags & ~Agent.AIStateFlag.AlarmStateMask)
+            escort.SetTargetAgent(null);
+            escort.SetWatchState(previousWatchState);
+            escort.AIStateFlags =
+                (escort.AIStateFlags & ~Agent.AIStateFlag.AlarmStateMask)
                 | previousAlarmState;
 
-            _savedAlarmFlags.Remove(bodyguard);
+            _savedAlarmFlags.Remove(escort);
         }
     }
 }

@@ -21,5 +21,13 @@ namespace NobleBodyguards
             RequireRestart = false,
             HintText = "Spawn bodyguards in eligible settlement missions.")]
         public bool Enabled { get; set; } = true;
+
+        /// <summary>Gets or sets whether only the player receives bodyguards, disabling companion and lord escorts.</summary>
+        [SettingPropertyBool(
+            "Player bodyguards only",
+            Order = 1,
+            RequireRestart = false,
+            HintText = "When enabled, only the player receives bodyguards. Companions and lords get none.")]
+        public bool PlayerOnly { get; set; } = false;
     }
 }

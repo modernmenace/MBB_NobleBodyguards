@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using TaleWorlds.CampaignSystem;
@@ -10,12 +11,12 @@ using TaleWorlds.Library;
 namespace NobleBodyguards
 {
     /// <summary>
-    /// Selects healthy, non-hero troops from the main party for settlement escort missions.
+    /// Selects healthy, non-hero troops from a party for settlement escort missions.
     /// </summary>
     public class BodyguardSelectionBehavior : CampaignBehaviorBase
     {
         /// <summary>
-        /// Gets the currently selected bodyguards, ordered by troop tier and power.
+        /// Gets the currently selected bodyguards for the player, ordered by troop tier and power.
         /// </summary>
         public static List<CharacterObject> SelectedBodyguards { get; private set; } = new List<CharacterObject>();
 
@@ -36,7 +37,7 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Selects up to two healthy, non-hero members from the specified party.
+        /// Selects up to two healthy, non-hero members from the main party and stores them as the player's escorts.
         /// </summary>
         /// <param name="party">The party whose roster is used for selection. If <see langword="null"/>, the current selection is unchanged.</param>
         /// <param name="preferCavalry">If <see langword="true"/>, selects mounted troops first, falling back to infantry when none are available.</param>
@@ -47,6 +48,23 @@ namespace NobleBodyguards
                 return;
             }
 
+            SelectedBodyguards = ChooseEscorts(party, preferCavalry, null);
+        }
+
+        /// <summary>
+        /// Chooses up to two healthy, non-hero troops from a party without changing the stored player selection.
+        /// </summary>
+        /// <param name="party">The party whose roster is used for selection.</param>
+        /// <param name="preferCavalry">If <see langword="true"/>, selects mounted troops first, falling back to infantry when none are available.</param>
+        /// <param name="taken">Units already assigned to other escorts from the same party, keyed by character. May be <see langword="null"/>.</param>
+        /// <returns>The chosen troops, or an empty list if the party is <see langword="null"/>.</returns>
+        public static List<CharacterObject> ChooseEscorts(MobileParty party, bool preferCavalry, IDictionary<CharacterObject, int> taken)
+        {
+            if (party == null)
+            {
+                return new List<CharacterObject>();
+            }
+
             List<TroopRosterElement> troops = party.MemberRoster.GetTroopRoster()
                 .Where(element => !element.Character.IsHero)
                 .ToList();
@@ -54,35 +72,49 @@ namespace NobleBodyguards
             if (preferCavalry)
             {
                 List<CharacterObject> cavalry = RankHealthyTroops(
-                    troops.Where(element => element.Character.IsMounted));
+                    troops.Where(element => element.Character.IsMounted),
+                    taken);
 
                 if (cavalry.Count > 0)
                 {
-                    SelectedBodyguards = cavalry;
-                    return;
+                    return cavalry;
                 }
             }
 
-            SelectedBodyguards = RankHealthyTroops(
-                troops.Where(element => element.Character.IsInfantry));
+            return RankHealthyTroops(
+                troops.Where(element => element.Character.IsInfantry),
+                taken);
         }
 
         /// <summary>
-        /// Expands healthy troop stacks into individual candidates, ranks them, and returns the top two.
+        /// Expands healthy troop stacks into individual candidates, skips units already taken, ranks them, and returns the top two.
         /// </summary>
         /// <param name="troops">The roster elements to consider.</param>
+        /// <param name="taken">Units already assigned, keyed by character. May be <see langword="null"/>.</param>
         /// <returns>Up to two ranked troops.</returns>
-        private static List<CharacterObject> RankHealthyTroops(IEnumerable<TroopRosterElement> troops)
+        private static List<CharacterObject> RankHealthyTroops(
+            IEnumerable<TroopRosterElement> troops,
+            IDictionary<CharacterObject, int> taken)
         {
             return troops
-                .Where(element => element.Number > element.WoundedNumber)
                 .SelectMany(element => Enumerable.Repeat(
                     element.Character,
-                    element.Number - element.WoundedNumber))
+                    Math.Max(0, element.Number - element.WoundedNumber - GetTakenCount(taken, element.Character))))
                 .OrderByDescending(character => character.Tier)
                 .ThenByDescending(character => character.GetPower())
                 .Take(2)
                 .ToList();
+        }
+
+        /// <summary>
+        /// Gets how many units of a character have already been assigned.
+        /// </summary>
+        /// <param name="taken">The assigned counts. May be <see langword="null"/>.</param>
+        /// <param name="character">The character to look up.</param>
+        /// <returns>The number of assigned units.</returns>
+        private static int GetTakenCount(IDictionary<CharacterObject, int> taken, CharacterObject character)
+        {
+            return taken != null && taken.TryGetValue(character, out int count) ? count : 0;
         }
 
         /// <summary>
