@@ -29,11 +29,21 @@ namespace NobleBodyguards
         private bool _bodyguardsSpawnAttempted;
         private bool _mountedEscort;
 
+        /// <summary>Snapshot of an escort's state, used to rebuild it after a mount change.</summary>
+        private struct EscortSnapshot
+        {
+            public CharacterObject Character;
+            public Vec3 Position;
+            public Vec2 Direction;
+            public Agent.WatchState WatchState;
+        }
+
         /// <summary>Gets the mission behavior category for this behavior.</summary>
         public override MissionBehaviorType BehaviorType => MissionBehaviorType.Other;
 
         /// <summary>
-        /// Spawns the selected bodyguards once the player is active and updates their follow positions.
+        /// Spawns the selected bodyguards once the player is active, respawns them when the player
+        /// mounts or dismounts, and updates their follow positions.
         /// </summary>
         /// <param name="dt">Elapsed time since the previous mission tick.</param>
         public override void OnMissionTick(float dt)
@@ -53,6 +63,15 @@ namespace NobleBodyguards
                 BodyguardSelectionBehavior.SelectBodyguards(MobileParty.MainParty, _mountedEscort);
                 SpawnBodyguards();
                 _bodyguardsSpawnAttempted = true;
+            }
+            else
+            {
+                // Swap escorts to match the player's current mount state.
+                bool mountedEscortWanted = IsMountedVillageEscort(player);
+                if (mountedEscortWanted != _mountedEscort)
+                {
+                    RespawnEscorts(mountedEscortWanted);
+                }
             }
 
             // Prioritize combat; otherwise keep the guards in escort positions.
@@ -104,12 +123,21 @@ namespace NobleBodyguards
         /// <summary>Attempts to spawn each selected bodyguard near the player.</summary>
         private void SpawnBodyguards()
         {
+            Agent player = Agent.Main;
+            if (player == null)
+            {
+                return;
+            }
+
             int index = 0;
 
             // Preserve selection order so each guard keeps a consistent side of the player.
             foreach (CharacterObject character in BodyguardSelectionBehavior.SelectedBodyguards)
             {
-                Agent agent = SpawnAgentNearPlayer(character, index);
+                Vec3 spawnPosition = GetFollowPosition(player, index);
+                Vec2 spawnDirection = player.Frame.rotation.f.AsVec2;
+
+                Agent agent = SpawnAgent(character, spawnPosition, spawnDirection);
                 if (agent != null)
                 {
                     _bodyguardAgents.Add(agent);
@@ -119,11 +147,78 @@ namespace NobleBodyguards
             }
         }
 
-        /// <summary>Creates a mission agent at the follow position corresponding to its index.</summary>
+        /// <summary>
+        /// Replaces every escort with a new agent in the matching mount state. Each replacement keeps
+        /// the old escort's position, facing, watch state, and combat state.
+        /// </summary>
+        /// <param name="mounted">Whether the replacement escorts should be mounted.</param>
+        private void RespawnEscorts(bool mounted)
+        {
+            _mountedEscort = mounted;
+
+            for (int i = 0; i < _bodyguardAgents.Count; i++)
+            {
+                Agent oldAgent = _bodyguardAgents[i];
+                if (oldAgent == null || !oldAgent.IsActive())
+                {
+                    continue;
+                }
+
+                EscortSnapshot snapshot = CaptureEscort(oldAgent);
+                if (snapshot.Character == null)
+                {
+                    continue;
+                }
+
+                Agent newAgent = SpawnAgent(snapshot.Character, snapshot.Position, snapshot.Direction);
+                if (newAgent == null)
+                {
+                    continue;
+                }
+
+                newAgent.SetWatchState(snapshot.WatchState);
+
+                // Carry combat state over to the replacement so it keeps fighting.
+                if (_savedAlarmFlags.TryGetValue(oldAgent, out Agent.AIStateFlag savedAlarmFlags))
+                {
+                    _savedAlarmFlags.Remove(oldAgent);
+                    _savedAlarmFlags.Add(newAgent, savedAlarmFlags);
+                    newAgent.AIStateFlags |= Agent.AIStateFlag.Alarmed;
+
+                    Agent target = oldAgent.GetTargetAgent();
+                    if (target != null)
+                    {
+                        newAgent.SetTargetAgent(target);
+                    }
+                }
+
+                oldAgent.FadeOut(false, true);
+                _bodyguardAgents[i] = newAgent;
+            }
+        }
+
+        /// <summary>Captures an escort's position, facing, character, and watch state.</summary>
+        /// <param name="escort">The escort to capture.</param>
+        /// <returns>A snapshot of the escort's current state.</returns>
+        private static EscortSnapshot CaptureEscort(Agent escort)
+        {
+            return new EscortSnapshot
+            {
+                Character = escort.Character as CharacterObject,
+                Position = escort.Position,
+                Direction = escort.Frame.rotation.f.AsVec2,
+                WatchState = escort.CurrentWatchState
+            };
+        }
+
+        /// <summary>
+        /// Creates a mission agent at the given position and facing, matching the current mount state.
+        /// </summary>
         /// <param name="character">The character to spawn.</param>
-        /// <param name="index">The body's position index in the formation.</param>
-        /// <returns>The spawned agent, or <see langword="null"/> if there is no player agent.</returns>
-        private Agent SpawnAgentNearPlayer(CharacterObject character, int index)
+        /// <param name="position">The world-space spawn position.</param>
+        /// <param name="direction">The horizontal facing direction.</param>
+        /// <returns>The spawned agent, or <see langword="null"/> if there is no player agent or the spawn failed.</returns>
+        private Agent SpawnAgent(CharacterObject character, Vec3 position, Vec2 direction)
         {
             Agent player = Agent.Main;
             if (player == null)
@@ -131,12 +226,10 @@ namespace NobleBodyguards
                 return null;
             }
 
-            Vec3 spawnPosition = GetFollowPosition(player, index);
-
             // Use the troop's campaign origin; mounted escorts use their equipped horse.
             AgentBuildData buildData = new AgentBuildData(character)
-                .InitialPosition(spawnPosition)
-                .InitialDirection(player.Frame.rotation.f.AsVec2)
+                .InitialPosition(position)
+                .InitialDirection(direction)
                 .Team(player.Team)
                 .Banner(PartyBase.MainParty.Banner)
                 .ClothingColor1(player.Team.Color)
@@ -196,11 +289,16 @@ namespace NobleBodyguards
         {
             float sideOffset = index == 0 ? -SideDistance : SideDistance;
 
+            // Mounted escorts sit farther back to leave room for their horses.
+            float behindDistance = _mountedEscort ? (BehindDistance + 1.0f) : BehindDistance;
+
             return player.Position
-                - player.Frame.rotation.f * BehindDistance
+                - player.Frame.rotation.f * behindDistance
                 + player.Frame.rotation.s * sideOffset;
         }
 
+        /// <summary>Saves the bodyguard's alarm state and switches it to alarmed during combat.</summary>
+        /// <param name="bodyguard">The bodyguard entering combat.</param>
         private void SetCombatWatchState(Agent bodyguard)
         {
             if (_savedAlarmFlags.ContainsKey(bodyguard))
@@ -216,6 +314,8 @@ namespace NobleBodyguards
             bodyguard.SetWatchState(Agent.WatchState.Alarmed);
         }
 
+        /// <summary>Restores the bodyguard's saved alarm state after combat ends.</summary>
+        /// <param name="bodyguard">The bodyguard leaving combat.</param>
         private void RestoreWatchState(Agent bodyguard)
         {
             if (!_savedAlarmFlags.TryGetValue(bodyguard, out Agent.AIStateFlag savedAlarmFlags))
