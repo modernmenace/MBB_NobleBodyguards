@@ -14,3 +14,7 @@ A Mount & Blade II: Bannerlord mod that adds escorts in eligible town and villag
 ## Settings
 
 The mod uses Mod Configuration Menu v5. Bodyguards are enabled by default. Disable **Enable bodyguards** in the Noble Bodyguards settings to stop escorts from being added to subsequent eligible missions.
+
+- **Enable bodyguards:** Turns all escorts on or off. Default: on.
+- **Player bodyguards only:** When on, only the player gets escorts. Companions and lords get none. Default: off.
+- **Army troops in villages:** Adds non-hero troops from lord armies present in a village. They walk around the village center alongside the villagers, using about 10% of the available spawn points. Default: on.

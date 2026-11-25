@@ -27,7 +27,7 @@ namespace NobleBodyguards
                 CampaignGameStarter campaignGameStarter = (CampaignGameStarter)gameStarterObject;
 
                 // add our behavior to the campaign starter
-                campaignGameStarter.AddBehavior(new BodyguardSelectionBehavior());
+                campaignGameStarter.AddBehavior(new ArmyVillageWalkerBehavior());
             }
         }
 
