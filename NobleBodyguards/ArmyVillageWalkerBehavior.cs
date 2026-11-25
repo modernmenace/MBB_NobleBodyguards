@@ -80,7 +80,7 @@ namespace NobleBodyguards
                 return;
             }
 
-            List<CharacterObject> pool = GetArmyTroopPool(settlement);
+            List<WalkerTroop> pool = GetArmyTroopPool(settlement);
             if (pool.Count == 0)
             {
                 Log("Skipped: no lord army troops in " + settlement.Name + ".");
@@ -94,19 +94,19 @@ namespace NobleBodyguards
                 return;
             }
 
-            List<CharacterObject> selected = pool
-                .OrderBy(character => MBRandom.RandomFloat)
+            List<WalkerTroop> selected = pool
+                .OrderBy(walker => MBRandom.RandomFloat)
                 .Take(walkerCount)
                 .ToList();
 
             Log("Spawning " + selected.Count + " walkers from " + pool.Count + " troops (" + points + " npc_common points).");
 
             CultureObject culture = settlement.Culture;
-            foreach (IGrouping<CharacterObject, CharacterObject> group in selected.GroupBy(character => character))
+            foreach (IGrouping<object, WalkerTroop> group in selected.GroupBy(walker => new { walker.Character, walker.Owner }))
             {
-                CharacterObject character = group.Key;
+                WalkerTroop walker = group.First();
                 villageCenter.AddLocationCharacters(
-                    (CreateLocationCharacterDelegate)((cultureObject, relation) => CreateWalker(character, relation)),
+                    (CreateLocationCharacterDelegate)((cultureObject, relation) => CreateWalker(walker, relation)),
                     culture,
                     default(CharacterRelations),
                     group.Count());
@@ -146,10 +146,10 @@ namespace NobleBodyguards
         /// Collects healthy, non-hero troops from the player's party and from lord parties in the settlement.
         /// </summary>
         /// <param name="settlement">The village being populated.</param>
-        /// <returns>One entry per available troop.</returns>
-        private static List<CharacterObject> GetArmyTroopPool(Settlement settlement)
+        /// <returns>One entry per available troop, with its owning clan.</returns>
+        private static List<WalkerTroop> GetArmyTroopPool(Settlement settlement)
         {
-            List<CharacterObject> pool = new List<CharacterObject>();
+            List<WalkerTroop> pool = new List<WalkerTroop>();
 
             foreach (MobileParty party in settlement.Parties)
             {
@@ -171,7 +171,7 @@ namespace NobleBodyguards
                     int available = Math.Max(0, element.Number - element.WoundedNumber);
                     for (int i = 0; i < available; i++)
                     {
-                        pool.Add(element.Character);
+                        pool.Add(new WalkerTroop(element.Character, party.ActualClan));
                     }
                 }
             }
@@ -180,21 +180,28 @@ namespace NobleBodyguards
         }
 
         /// <summary>
-        /// Creates a walker agent for an army troop, using the same wander behavior as the villagers.
+        /// Creates a walker agent for an army troop, using the owning clan's banner and colors.
         /// </summary>
-        /// <param name="character">The troop to spawn.</param>
+        /// <param name="walker">The troop and its owning clan.</param>
         /// <param name="relation">The relation of the walker to the player.</param>
         /// <returns>The location character to add to the village center.</returns>
-        private static LocationCharacter CreateWalker(CharacterObject character, CharacterRelations relation)
+        private static LocationCharacter CreateWalker(WalkerTroop walker, CharacterRelations relation)
         {
+            CharacterObject character = walker.Character;
+            Clan owner = walker.Owner;
+
             Tuple<string, Monster> actionSetAndMonster = character.IsFemale
                 ? CommonTownsfolkCampaignBehavior.GetRandomTownsWomanActionSetAndMonster(character.Race)
                 : CommonTownsfolkCampaignBehavior.GetRandomTownsManActionSetAndMonster(character.Race);
 
             Campaign.Current.Models.AgeModel.GetAgeLimitForLocation(character, out int minAge, out int maxAge, "");
 
-            AgentData agentData = new AgentData((IAgentOriginBase)new SimpleAgentOrigin(character, -1, (Banner)null, default(UniqueTroopDescriptor)))
+            AgentData agentData = new AgentData((IAgentOriginBase)new SimpleAgentOrigin(character, -1, owner?.Banner, new UniqueTroopDescriptor()))
                 .Monster(actionSetAndMonster.Item2)
+                .Equipment(character.FirstBattleEquipment)
+                .NoHorses(true)
+                .ClothingColor1(owner != null ? owner.Color : 0xFFFFFFFF)
+                .ClothingColor2(owner != null ? owner.Color2 : 0xFFFFFFFF)
                 .Age(MBRandom.RandomInt(minAge, maxAge));
 
             IAgentBehaviorManager agentBehaviorManager = SandBoxManager.Instance.AgentBehaviorManager;
@@ -205,7 +212,7 @@ namespace NobleBodyguards
                 false,
                 relation,
                 actionSetAndMonster.Item1,
-                true,
+                false,
                 false,
                 (ItemObject)null,
                 false,
@@ -213,6 +220,22 @@ namespace NobleBodyguards
                 true,
                 (AfterAgentCreatedDelegate)null,
                 false);
+        }
+
+        /// <summary>
+        /// A troop available to walk in the village, along with the clan that owns it.
+        /// </summary>
+        private sealed class WalkerTroop
+        {
+            public WalkerTroop(CharacterObject character, Clan owner)
+            {
+                Character = character;
+                Owner = owner;
+            }
+
+            public CharacterObject Character { get; }
+
+            public Clan Owner { get; }
         }
     }
 }
